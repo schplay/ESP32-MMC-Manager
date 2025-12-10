@@ -68,16 +68,25 @@ void loop() {
 ## Protocol
 All commands are line-based and end with \n.
 Paths are quoted when they contain spaces.
-
-STORAGE                     → TOTAL:1234567890 FREE:987654321\nDONE
-LIST "/path"                → FILE : name.ext SIZE : 12345\nDIR : subdir\nDONE
-CREATE_DIR "/new folder"    → DIR created\nDONE
+```
+STORAGE                     → TOTAL:1234567890 FREE:987654321\n
+DONE
+LIST "/path"                → FILE : name.ext SIZE : 12345\n
+DIR : subdir\n
+DONE
+CREATE_DIR "/new folder"    → DIR created\n
+DONE
 PUTFILE "/file with spaces.txt" 54321   → (binary data follows)
-GETSIZE "/file.txt"         → SIZE:54321\nDONE
+GETSIZE "/file.txt"         → SIZE:54321\n
+DONE
 GETDATA "/file.txt"         → (raw binary, exactly SIZE bytes)
-DELETE "/file.txt"          → DELETED\nDONE
-REMOVE_DIR "/folder"        → REMOVED\nDONE
-RENAME "/old" "/new"        → RENAMED\nDONE
+DELETE "/file.txt"          → DELETED\n
+DONE
+REMOVE_DIR "/folder"        → REMOVED\n
+DONE
+RENAME "/old" "/new"        → RENAMED\n
+DONE
+```
 
 ## Known Limitations
 * **Maximum file size** – limited by RAM only when uploading (streamed in 16 KB chunks).
