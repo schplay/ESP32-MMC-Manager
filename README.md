@@ -1,5 +1,7 @@
 # ESP32 MMC File Manager (Desktop + Firmware)
 
+![Screenshot of Application](screenshot.png)
+
 A **full-featured, high-speed file manager** for the ESP32-S3 with MMC (SD or EMMC) storage.
 It lets you:
 
@@ -26,12 +28,28 @@ need them. This tool solved that problem for me and it may be useful to you too.
 
 ### Requirements
 ```bash
-pip install pyserial
+pip install -r requirements.txt
 ```
 ### Run
 ```bash
-python ESPFileManager.py
+python src/ESPFileManager.py
 ```
+
+### Building the Executable (Windows)
+You can create a standalone `.exe` file using PyInstaller:
+
+1. Install requirements:
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. Run the build command:
+   ```bash
+   pyinstaller --noconfirm --onefile --windowed --name "ESPFileManager" "src/ESPFileManager.py"
+   ```
+   
+   *Note: To add an icon, append `--icon="icon.ico" --add-data "icon.ico;."` to the command.*
+
+The executable will be generated in the `dist/` folder.
 
 ## ESP32 Firmware
 
