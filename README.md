@@ -68,7 +68,7 @@ Only the standard Arduino ESP32 core and SD_MMC are required.
 ESP32FileManager fileManager;   // global instance
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(2000000);  // High baud rate recommended
   delay(100);
   while (!Serial) delay(10);
 
@@ -76,38 +76,76 @@ void setup() {
     Serial.println("ERROR: Mount Failed");
     while (1) delay(100);
   }
+  
+  fileManager.begin();  // Optional: sends initial READY
 }
 
 void loop() {
   fileManager.handleFileManager();   // <-- ONLY THIS LINE NEEDED
+  
+  // Optional: suppress debug output during transfers
+  if (!fileManager.isTransferActive()) {
+    // Your debug Serial.print() calls here
+  }
 }
 ```
+
+### Advanced Features
+The firmware class provides additional methods for advanced use cases:
+
+- **`isTransferActive()`** - Returns `true` during file uploads. Use this to suppress debug Serial output that would interfere with the binary transfer.
+- **`setKeepAliveCallback(callback)`** - Register a function that fires every ~200ms during long transfers. Useful for sending heartbeats or updating displays.
 
 ## Protocol
 All commands are line-based and end with \n.
 Paths are quoted when they contain spaces.
+
+### Basic Commands
 ```
 STORAGE                     → TOTAL:1234567890 FREE:987654321\n
-DONE
+                              DONE
 LIST "/path"                → FILE : name.ext SIZE : 12345\n
-DIR : subdir\n
-DONE
+                              DIR : subdir\n
+                              DONE
 CREATE_DIR "/new folder"    → DIR created\n
-DONE
-PUTFILE "/file with spaces.txt" 54321   → (binary data follows)
+                              DONE
 GETSIZE "/file.txt"         → SIZE:54321\n
-DONE
+                              DONE
 GETDATA "/file.txt"         → (raw binary, exactly SIZE bytes)
 DELETE "/file.txt"          → DELETED\n
-DONE
+                              DONE
 REMOVE_DIR "/folder"        → REMOVED\n
-DONE
+                              DONE
 RENAME "/old" "/new"        → RENAMED\n
-DONE
+                              DONE
 ```
 
+### PUTFILE (Chunked Transfer with Flow Control)
+The PUTFILE command uses a robust chunked protocol to handle large files reliably:
+
+```
+→ PUTFILE "/file.bin" 10485760
+← READY 4096
+→ (send 4096 bytes)
+← NEXT
+→ (send 4096 bytes)
+← NEXT
+... (repeat until all data sent)
+← OK
+← DONE
+```
+
+**Flow:**
+1. Client sends `PUTFILE "path" size`
+2. ESP32 responds with `READY chunk_size` (typically 4096 bytes)
+3. Client sends exactly `chunk_size` bytes
+4. ESP32 writes to SD and responds with `NEXT`
+5. Repeat steps 3-4 until all data is sent
+6. ESP32 responds with `OK` then `DONE`
+
+If any error occurs, ESP32 sends `ERROR` instead of `NEXT`/`OK`.
+
 ## Known Limitations
-* **Maximum file size** – limited by RAM only when uploading (streamed in 16 KB chunks).
-Downloads can be any size (streamed to PC).
-* **Recursive delete** - may take a few seconds for very large folders (progress is shown in console).
-* **Serial exclusivity** - during upload or download operations, other messages on the serial bus will corrupt the transfer so other serial communications (such as your ESP32 printing status messages) should be disabled for these operations.
+* **File size** – No practical limit. Files are streamed in 4KB chunks for uploads and 32KB chunks for downloads.
+* **Recursive delete** - May take a few seconds for very large folders (progress is shown in console).
+* **Debug output during transfers** - The Python app filters debug messages, but for best reliability, use `isTransferActive()` to suppress Serial output during file transfers.

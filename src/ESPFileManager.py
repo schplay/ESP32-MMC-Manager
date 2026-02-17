@@ -218,6 +218,36 @@ class ESPFileBrowser(tk.Tk):
         except Exception as e:
             messagebox.showerror("Connection Failed", str(e))
 
+    def read_protocol_response(self, timeout=10, *expected_keywords):
+        """
+        Read lines from serial, skipping firmware debug output,
+        until a line starting with one of the expected keywords is found.
+        """
+        deadline = time.time() + timeout
+        # Use a short timeout for readline so we can check the deadline frequently
+        # but long enough to capture full lines without aggressive CPU spinning
+        old_timeout = self.ser.timeout
+        self.ser.timeout = 0.5 
+        
+        try:
+            while time.time() < deadline:
+                try:
+                    line = self.ser.readline().decode(errors="replace").strip()
+                except Exception:
+                    continue
+                
+                if not line:
+                    continue
+                    
+                for keyword in expected_keywords:
+                    if line.startswith(keyword):
+                        return line
+                self.log(f"DEBUG: {line}")
+        finally:
+            self.ser.timeout = old_timeout
+            
+        raise TimeoutError(f"Timed out waiting for one of: {expected_keywords}")
+
     def disconnect(self):
         """Close the serial connection and reset the UI state"""
         if self.ser:
@@ -333,22 +363,78 @@ class ESPFileBrowser(tk.Tk):
 
         def run():
             try:
+                # 1. Send Command
                 self.send(f"PUTFILE {remote_path} {size}")
-                time.sleep(0.05)
+                
+                # 2. Wait for READY {chunk_size} using robust reader
+                try:
+                    resp = self.read_protocol_response(5.0, "READY", "ERROR")
+                except TimeoutError:
+                    raise Exception("Timeout waiting for READY response")
+                
+                self.log(f"← {resp}")
+                
+                if resp.startswith("ERROR"):
+                     raise Exception(f"Device reported error: {resp}")
+
+                if not resp.startswith("READY"):
+                   raise Exception(f"Protocol Error: Expected READY, got '{resp}'")
+                
+                try:
+                    chunk_size = int(resp.split()[1])
+                except (IndexError, ValueError):
+                    raise Exception(f"Protocol Error: Invalid chunk size in '{resp}'")
+
+                # 3. Send file in chunks
                 with open(local, "rb") as f:
                     sent = 0
                     while sent < size:
-                        chunk = f.read(16384)
+                        chunk = f.read(chunk_size)
                         if not chunk: break
-                        self.ser.write(chunk)
+                        
+                        # Send the entire chunk as specified by the protocol
+                        self.log(f"Sending chunk of {len(chunk)} bytes (offset {sent})...")
+                        bytes_written = self.ser.write(chunk)
+                        self.ser.flush()
+                        self.log(f"Actually wrote {bytes_written} bytes")
+                        if bytes_written != len(chunk):
+                            raise Exception(f"Write failed: only {bytes_written}/{len(chunk)} bytes written")
+                        
+                        
                         sent += len(chunk)
                         pb['value'] = sent
                         lbl.config(text=f"{self.human_size(sent)} / {self.human_size(size)}")
                         win.update_idletasks()
-                self.read_response(1.0)
+                        
+                        # 4. Wait for acknowledgement (skip if this was the final chunk)
+                        if sent < size:
+                            self.log(f"Waiting for NEXT acknowledgement...")
+                            try:
+                                ack = self.read_protocol_response(10.0, "NEXT", "ERROR")
+                            except TimeoutError:
+                                 raise Exception(f"Timeout waiting for NEXT at offset {sent}")
+                                 
+                            if ack.startswith("ERROR"):
+                                raise Exception(f"Device reported error during upload: {ack}")
+
+                            if ack != "NEXT":
+                                raise Exception(f"Protocol Error: Expected NEXT, got '{ack}' at offset {sent}")
+
+                # 5. Read final status (OK/ERROR and DONE)
+                # We can use the helper here too to be safe against trailing debug logs
+                try:
+                    res = self.read_protocol_response(2.0, "OK", "ERROR")
+                    if res.startswith("ERROR"):
+                        raise Exception(f"Final status error: {res}")
+                    
+                    done = self.read_protocol_response(2.0, "DONE")
+                except TimeoutError:
+                    self.log("Warning: Timed out waiting for final confirmation")
+
                 self.refresh()
                 messagebox.showinfo("Success", f"Uploaded:\n{name}")
             except Exception as e:
+                self.log(f"Upload failed: {e}")
                 messagebox.showerror("Error", f"Upload failed:\n{e}")
             finally:
                 win.destroy()
@@ -382,15 +468,27 @@ class ESPFileBrowser(tk.Tk):
             try:
                 # ---- GET SIZE ----
                 self.send(f"GETSIZE {remote_path}")
-                resp = self.read_response(0.8)
-                size_line = [l for l in resp if l.startswith("SIZE:")]
-                if not size_line:
+                try:
+                    size_resp = self.read_protocol_response(2.0, "SIZE:", "ERROR")
+                except TimeoutError:
+                    messagebox.showerror("Error", "Timeout getting file size")
+                    win.destroy()
+                    return
+                    
+                if size_resp.startswith("ERROR"):
                     messagebox.showerror("Error", "Failed to get file size")
                     win.destroy()
                     return
-                size = int(size_line[0].split(":", 1)[1])
+                    
+                size = int(size_resp.split(":", 1)[1])
                 pb['maximum'] = size
                 lbl.config(text="0 B / 0 B")
+                
+                # Wait for DONE
+                try:
+                    self.read_protocol_response(1.0, "DONE")
+                except TimeoutError:
+                    pass  # Optional, continue anyway
 
                 # ---- GET DATA (binary) ----
                 self.send(f"GETDATA {remote_path}")

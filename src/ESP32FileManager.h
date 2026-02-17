@@ -13,6 +13,7 @@
  *   • STORAGE, LIST, CREATE_DIR, PUTFILE, GETSIZE, GETDATA,
  *     DELETE, REMOVE_DIR, RENAME
  *   • Recursive directory listing (listDir helper)
+ *   • Non-blocking PUTFILE with chunked flow control
  *   • Simple, robust, no extra libraries
  *
  * --------------------------------------------------------------
@@ -45,8 +46,26 @@ public:
     Serial.println("READY");
   }
 
-  // Call this from loop()
+  // Returns true while a file transfer is in progress.
+  // Use this to suppress debug Serial output that would corrupt the protocol.
+  bool isTransferActive() const {
+    return _putActive;
+  }
+
+  // Register a callback that fires periodically during long transfers.
+  // Use this to send heartbeats or perform other time-critical tasks.
+  void setKeepAliveCallback(void (*callback)()) {
+    _keepAliveCallback = callback;
+  }
+
+  // Call this from loop() — returns quickly, never blocks long
   void handleFileManager() {
+    // If a PUTFILE transfer is in progress, handle it non-blocking
+    if (_putActive) {
+      _handlePutData();
+      return;
+    }
+
     if (!Serial.available()) return;
 
     String cmd = Serial.readStringUntil('\n');
@@ -82,7 +101,7 @@ public:
       Serial.println("DIR created");
       Serial.println("DONE");
 
-    // ---------- PUTFILE ----------
+    // ---------- PUTFILE (non-blocking start) ----------
     } else if (cmd.startsWith("PUTFILE ")) {
       int lastSpace = cmd.lastIndexOf(' ');
       if (lastSpace <= 8) {
@@ -91,28 +110,23 @@ public:
         return;
       }
       String path = getPath(cmd, 8);
-      long size = cmd.substring(lastSpace + 1).toInt();
+      _putSize = cmd.substring(lastSpace + 1).toInt();
 
-      File f = SD_MMC.open(path.c_str(), FILE_WRITE);
-      if (!f) {
+      _putFile = SD_MMC.open(path.c_str(), FILE_WRITE);
+      if (!_putFile) {
         Serial.println("ERROR");
         Serial.println("DONE");
         return;
       }
 
-      long received = 0;
-      uint8_t buf[1024];
-      while (received < size) {
-        int want = min(1024, (int)(size - received));
-        int got = Serial.readBytes(buf, want);
-        if (got <= 0) break;
-        f.write(buf, got);
-        received += got;
-      }
-      f.close();
-
-      Serial.println(received == size ? "OK" : "ERROR");
-      Serial.println("DONE");
+      _putReceived = 0;
+      _putChunkPos = 0;
+      _putLastData = millis();
+      _putActive = true;
+      Serial.printf("READY %d\n", PUT_CHUNK);
+      Serial.flush();  // Ensure READY is sent over USB before reading
+      _lastKeepAlive = millis();
+      _handlePutData();  // Stay here until transfer completes
 
     // ---------- GETSIZE ----------
     } else if (cmd.startsWith("GETSIZE ")) {
@@ -136,9 +150,15 @@ public:
         return;
       }
       uint8_t buf[1024];
+      unsigned long lastKA = millis();
       while (f.available()) {
         size_t len = f.read(buf, sizeof(buf));
         Serial.write(buf, len);
+        if (millis() - lastKA >= 200) {
+          if (_keepAliveCallback) _keepAliveCallback();
+          lastKA = millis();
+          delay(1);  // Feed TWDT
+        }
       }
       f.close();
 
@@ -184,6 +204,71 @@ public:
   }
 
 private:
+  // -----------------------------------------------------------------
+  // PUTFILE non-blocking state
+  // -----------------------------------------------------------------
+  static const int PUT_CHUNK = 4096;
+  bool _putActive = false;
+  File _putFile;
+  long _putSize = 0;
+  long _putReceived = 0;
+  int  _putChunkPos = 0;
+  unsigned long _putLastData = 0;
+  uint8_t _putBuf[4096];
+  void (*_keepAliveCallback)() = nullptr;
+  unsigned long _lastKeepAlive = 0;
+
+  // Loops internally for the entire PUTFILE transfer.
+  // Uses available()+read() instead of timed readBytes for reliable HWCDC support.
+  // Keep-alive callback fires every ~200ms for heartbeat support.
+  void _handlePutData() {
+    while (_putActive) {
+      long remaining = _putSize - _putReceived;
+      int chunkWant = (remaining > PUT_CHUNK) ? PUT_CHUNK : (int)remaining;
+
+      // Read whatever is available right now (no timeout dependency)
+      int avail = Serial.available();
+      if (avail > 0) {
+        int toRead = avail;
+        if (toRead > chunkWant - _putChunkPos) toRead = chunkWant - _putChunkPos;
+        int got = Serial.readBytes(_putBuf + _putChunkPos, toRead);
+        if (got > 0) {
+          _putChunkPos += got;
+          _putLastData = millis();
+        }
+      }
+
+      delay(1);  // Required: allows USB packet processing between reads
+
+      // Fire keep-alive callback every ~200ms to let app send heartbeats
+      if (_keepAliveCallback && millis() - _lastKeepAlive >= 200) {
+        _keepAliveCallback();
+        _lastKeepAlive = millis();
+      }
+
+      // Full chunk accumulated — write to SD and request next
+      if (_putChunkPos >= chunkWant) {
+        _putFile.write(_putBuf, _putChunkPos);
+        _putReceived += _putChunkPos;
+        _putChunkPos = 0;
+
+        if (_putReceived >= _putSize) {
+          _putFile.close();
+          Serial.println("OK");
+          Serial.println("DONE");
+          _putActive = false;
+        } else {
+          Serial.println("NEXT");
+        }
+      } else if (millis() - _putLastData > 10000) {
+        _putFile.close();
+        Serial.println("ERROR");
+        Serial.println("DONE");
+        _putActive = false;
+      }
+    }
+  }
+
   // -----------------------------------------------------------------
   // Helper: recursive directory listing (used by LIST)
   // -----------------------------------------------------------------
