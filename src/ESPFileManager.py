@@ -15,6 +15,8 @@ class ESPFileBrowser(tk.Tk):
         self.geometry("1200x800")
         self.ser = None
         self.current_path = "/"
+        self.sort_col = "#0"
+        self.sort_rev = False
         
         # Set icon if available (PyInstaller friendly)
         try:
@@ -135,7 +137,7 @@ class ESPFileBrowser(tk.Tk):
                   activeforeground="white", relief=tk.FLAT, padx=8, pady=2).pack(side=tk.LEFT)
 
         tk.Label(top, text="Baud:", bg=self.bg_color, fg=self.fg_color).pack(side=tk.LEFT, padx=(30,5))
-        self.baud_combo = ttk.Combobox(top, values=[9600, 19200, 31250, 38400, 57600, 74880, 115200, 230400, 250000, 460800, 500000, 921600, 1000000, 2000000], width=12, state="readonly")
+        self.baud_combo = ttk.Combobox(top, values=[9600, 19200, 31250, 38400, 57600, 74880, 115200, 230400, 250000, 460800, 500000, 921600, 1000000, 2000000, 3000000, 4000000], width=12, state="readonly")
         self.baud_combo.set(115200)
         self.baud_combo.pack(side=tk.LEFT, padx=5)
 
@@ -172,9 +174,9 @@ class ESPFileBrowser(tk.Tk):
         # === Treeview ===
         tree_frame = tk.Frame(self, bg=self.bg_color)
         tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        self.tree = ttk.Treeview(tree_frame, columns=("size",), show="tree headings", selectmode="browse")
-        self.tree.heading("#0", text="Name")
-        self.tree.heading("size", text="Size")
+        self.tree = ttk.Treeview(tree_frame, columns=("size", "raw_size"), displaycolumns=("size",), show="tree headings", selectmode="browse")
+        self.tree.heading("#0", text="Name", command=lambda: self.treeview_sort_column("#0", False))
+        self.tree.heading("size", text="Size", command=lambda: self.treeview_sort_column("size", False))
         self.tree.column("size", width=140, anchor="e")
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
@@ -248,6 +250,44 @@ class ESPFileBrowser(tk.Tk):
             
         raise TimeoutError(f"Timed out waiting for one of: {expected_keywords}")
 
+    def treeview_sort_column(self, col, reverse):
+        self.sort_col = col
+        self.sort_rev = reverse
+        
+        l = []
+        for k in self.tree.get_children(''):
+            vals = self.tree.item(k, 'values')
+            is_dir = (vals[0] == "")
+            
+            if col == "#0":
+                val = self.tree.item(k, 'text').strip().lower()
+            else:
+                try:
+                    val = int(vals[1])
+                except (IndexError, ValueError, TypeError):
+                    val = -1
+                    
+            l.append((val, is_dir, k))
+
+        # Always keep directories on top
+        dirs = [item for item in l if item[1]]
+        files = [item for item in l if not item[1]]
+        
+        dirs.sort(key=lambda x: x[0], reverse=reverse)
+        files.sort(key=lambda x: x[0], reverse=reverse)
+        
+        # Re-arrange items
+        for index, item in enumerate(dirs + files):
+            self.tree.move(item[2], '', index)
+
+        # Update heading command to reverse sort next time
+        self.tree.heading(col, command=lambda: self.treeview_sort_column(col, not reverse))
+        
+        # Update heading text with sort indicator arrows
+        arrow = " \u25BC" if reverse else " \u25B2"
+        self.tree.heading("#0", text="Name" + (arrow if col == "#0" else ""))
+        self.tree.heading("size", text="Size" + (arrow if col == "size" else ""))
+
     def disconnect(self):
         """Close the serial connection and reset the UI state"""
         if self.ser:
@@ -314,18 +354,22 @@ class ESPFileBrowser(tk.Tk):
         for line in lines:
             if line.startswith("DIR :"):
                 name = line[6:].strip()
-                self.tree.insert("", "end", text=" " + name, values=("",))
+                self.tree.insert("", "end", text=" " + name, values=("", -1))
             elif line.startswith("FILE :"):
                 parts = line.split(" SIZE : ")
                 name = parts[0][7:].strip()
-                size = int(parts[1])
-                self.tree.insert("", "end", text=" " + name, values=(self.human_size(size),))
+                size = int(parts[1]) if len(parts) > 1 else 0
+                self.tree.insert("", "end", text=" " + name, values=(self.human_size(size), size))
+
+        # Apply current sort
+        self.treeview_sort_column(self.sort_col, self.sort_rev)
 
     def on_double_click(self, event):
         item = self.tree.selection()
         if not item: return
         name = self.tree.item(item[0], "text").strip()
-        if self.tree.item(item[0], "values") == ("",):
+        # Directories have an empty size string as their first value
+        if self.tree.item(item[0], "values")[0] == "":
             self.current_path = (self.current_path.rstrip("/") + "/" + name + "/").replace("//", "/")
             self.refresh()
 

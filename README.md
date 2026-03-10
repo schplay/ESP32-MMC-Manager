@@ -12,7 +12,7 @@ It lets you:
 * See total / free storage in GB (2-decimal precision)
 * Work with **any filename** – spaces, Unicode, special characters are fully supported
 
-All communication is over a **single USB-Serial link** (up to **2 000 000 baud**).
+All communication is over a **single USB-Serial link** (up to **4 000 000 baud**).
 
 ---
 
